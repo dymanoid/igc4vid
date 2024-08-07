@@ -2,20 +2,10 @@ import * as fsp from 'fs/promises';
 import * as fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
-import yargs from 'yargs';
+import yargs, { number, string } from 'yargs';
 import * as yh from 'yargs/helpers';
-
-interface TrackPoint {
-    readonly time: string;
-    readonly latDeg: number;
-    readonly lonDeg: number;
-    readonly gpsAlt: number;
-}
-
-interface IgcFile {
-    readonly flightDate: string;
-    readonly trackPoints: TrackPoint[];
-}
+import * as xcs from 'igc-xc-score';
+import IGCParser, * as igcp from 'igc-parser';
 
 interface ElevationDataRowLocation {
     readonly lat: number;
@@ -37,52 +27,24 @@ interface TargetData {
     readonly time: string;
     readonly gpsAlt: number;
     readonly groundElev: number;
+    readonly xc: string;
+    readonly avgSpeed: number;
 }
 
-async function readIgcFile(filePath: string): Promise<IgcFile> {
-    const trackPoints: TrackPoint[] = [];
-    let flightDate: string = '';
-    const igcFile = await fsp.open(filePath);
-    try {
-        for await (const line of igcFile.readLines()) {
-            if (line.startsWith('HFDTE')) {
-                const dateString = line.substring(10, 21);
-                const day = dateString.substring(0, 2);
-                const month = dateString.substring(2, 4);
-                const year = '20' + dateString.substring(4, 6);
-                flightDate = `${year}-${month}-${day}`;
-            } else if (line.startsWith('B')) {
-                const timeStr = line.substring(1, 7);
-                const lat = parseInt(line.substring(7, 14));
-                const lon = parseInt(line.substring(15, 23));
-                const gpsAlt = parseInt(line.substring(25, 30));
-                let latDeg = ~~(lat / 100000) + (lat % 100000) / 60000.0;
-                let lonDeg = ~~(lon / 100000) + (lon % 100000) / 60000.0;
-                if (line[14] == 'S') {
-                    latDeg = -latDeg;
-                }
-                if (line[23] == 'W') {
-                    lonDeg = -lonDeg;
-                }
-                const time = `${timeStr.substring(0, 2)}:${timeStr.substring(2, 4)}:${timeStr.substring(4, 6)}`;
-                trackPoints.push({ time, latDeg, lonDeg, gpsAlt });
-            }
-        }
-    } finally {
-        await igcFile.close();
-    }
-
-    return { flightDate, trackPoints };
+async function readIgcFile(filePath: string): Promise<IGCParser.IGCFile> {
+    const igcString = await fsp.readFile(filePath, { encoding: 'utf8' });
+    const result = IGCParser.parse(igcString, { lenient: true });
+    return result;
 }
 
-async function getGroundElevations(server: string, trackPoints: TrackPoint[]): Promise<number[]> {
+async function getGroundElevations(server: string, igc: IGCParser.IGCFile): Promise<number[]> {
     const CHUNK_SIZE = 100;
     let result: number[] = [];
-    const dataLength = trackPoints.length;
+    const dataLength = igc.fixes.length;
 
     for (let i = 0; i < dataLength; i += CHUNK_SIZE) {
-        const chunk = trackPoints.slice(i, i + CHUNK_SIZE);
-        const locations = chunk.map(t => `${t.latDeg.toFixed(5)}, ${t.lonDeg.toFixed(5)}`).join('|');
+        const chunk = igc.fixes.slice(i, i + CHUNK_SIZE);
+        const locations = chunk.map(t => `${t.latitude.toFixed(5)}, ${t.longitude.toFixed(5)}`).join('|');
 
         const response = await fetch(`${server}?locations=${locations}`);
         process.stdout.write(`Processed ${i}/${dataLength}\r`);
@@ -100,16 +62,64 @@ async function getGroundElevations(server: string, trackPoints: TrackPoint[]): P
     return result;
 }
 
-async function processData(elevationServer: string, trackPoints: TrackPoint[]): Promise<TargetData[]> {
+function getRouteType(scoringCode: string): string | undefined {
+    switch (scoringCode) {
+        case 'fai':
+            return 'FAI';
+        case 'tri':
+            return 'flat';
+        default:
+            return undefined;
+    }
+}
+
+async function processData(elevationServer: string, igc: IGCParser.IGCFile): Promise<TargetData[]> {
+    const CHUNK_SIZE = 60;
+
     console.log('Getting elevation data...');
-    const elevations = await getGroundElevations(elevationServer, trackPoints);
+    const elevations = await getGroundElevations(elevationServer, igc);
     console.log(`Elevation data size: ${elevations.length}`);
     const processedData: TargetData[] = [];
     console.log('Calculating target dataset...');
-    trackPoints.forEach(({ time, gpsAlt }, i) => {
-        const groundElev = elevations[i];
-        processedData.push({ time, gpsAlt, groundElev });
-    });
+
+    const fixes = igc.fixes;
+    if (fixes.length == 0) {
+        return [];
+    }
+
+    const firstTimestamp = fixes[0].timestamp;
+
+    igc.fixes = [];
+
+    for (let i = 0; i < fixes.length; i += CHUNK_SIZE) {
+        process.stdout.write(`Processed ${i}/${fixes.length}\r`);
+        const chunk = fixes.slice(i, i + CHUNK_SIZE);
+        igc.fixes = igc.fixes.concat(chunk);
+
+        const solver = xcs.solver(igc, xcs.scoringRules.XContest, { noflight: true });
+        let solved = false;
+        let xc: string = '';
+        let avgSpeed: number;
+        do {
+            const next = solver.next().value;
+            solved = next.optimal || false;
+            if (solved) {
+                const scoreInfo = next.scoreInfo!;
+                xc = [getRouteType(next.opt.scoring.code), scoreInfo.distance.toFixed(0), 'km'].filter(Boolean).join(' ');
+                avgSpeed = scoreInfo.distance / ((chunk[chunk.length - 1].timestamp - firstTimestamp) / 3_600_000);
+            }
+        } while (!solved);
+
+        chunk.forEach((fix, j) => {
+            processedData.push({
+                time: fix.time,
+                gpsAlt: fix.gpsAltitude as number,
+                groundElev: elevations[i + j],
+                xc,
+                avgSpeed
+            });
+        });
+    }
 
     return processedData;
 }
@@ -118,9 +128,9 @@ async function writeProcessedFile(filePath: string, flightDate: string, processe
     const file = await fsp.open(filePath, 'w');
     try {
         await file.write('date,altitude(m),ground alt (m),agl (m)\n');
-        for (const { time, groundElev, gpsAlt } of processedData) {
+        for (const { time, groundElev, gpsAlt, xc, avgSpeed } of processedData) {
             await file.write(
-                `${flightDate}T${time}Z,${gpsAlt},${groundElev.toFixed(0)},${(gpsAlt - groundElev).toFixed(0)}\n`
+                `${flightDate}T${time}Z,${gpsAlt},${groundElev.toFixed(0)},${(gpsAlt - groundElev).toFixed(0)},${xc},${avgSpeed.toFixed(1)}\n`
             );
         }
     } finally {
@@ -144,14 +154,14 @@ async function run(argv: yargs.ArgumentsCamelCase<{}>) {
     }
 
     console.log('Reading IGC file...');
-    const { flightDate, trackPoints } = await readIgcFile(sourceIgc);
-    console.log(`Track length: ${trackPoints.length}`);
+    const igc = await readIgcFile(sourceIgc);
+    console.log(`Track length: ${igc.fixes.length}`);
     console.log('Processing data...');
-    const processedData = await processData(ELEVATION_SERVER_URL, trackPoints);
+    const processedData = await processData(ELEVATION_SERVER_URL, igc);
 
     const targetFile = path.format({ ...path.parse(sourceIgc), base: undefined, ext: '.csv' });
     console.log(`Writing target file: ${targetFile}`);
-    await writeProcessedFile(targetFile, flightDate, processedData);
+    await writeProcessedFile(targetFile, igc.date, processedData);
 }
 
 await (async function () {

@@ -14,6 +14,7 @@
     "@types/yargs": "^17.0.32"
   },
   "dependencies": {
+    "igc-parser": "^1.1.0",
     "igc-xc-score": "^1.7.0",
     "node-fetch": "^3.3.2",
     "tsx": "^4.16.5",
