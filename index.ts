@@ -2,10 +2,10 @@ import * as fsp from 'fs/promises';
 import * as fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
-import yargs, { number, string } from 'yargs';
+import yargs from 'yargs';
 import * as yh from 'yargs/helpers';
 import * as xcs from 'igc-xc-score';
-import IGCParser, * as igcp from 'igc-parser';
+import IGCParser from 'igc-parser';
 
 interface ElevationDataRowLocation {
     readonly lat: number;
@@ -105,7 +105,13 @@ async function processData(elevationServer: string, igc: IGCParser.IGCFile): Pro
             solved = next.optimal || false;
             if (solved) {
                 const scoreInfo = next.scoreInfo!;
-                xc = [getRouteType(next.opt.scoring.code), scoreInfo.distance.toFixed(0), 'km'].filter(Boolean).join(' ');
+                xc = [
+                    getRouteType(next.opt.scoring.code),
+                    (scoreInfo.distance - (!scoreInfo.penalty || Number.isNaN(scoreInfo.penalty) ? 0 : scoreInfo.penalty)).toFixed(0),
+                    'km',
+                ]
+                    .filter(Boolean)
+                    .join(' ');
                 avgSpeed = scoreInfo.distance / ((chunk[chunk.length - 1].timestamp - firstTimestamp) / 3_600_000);
             }
         } while (!solved);
@@ -116,7 +122,7 @@ async function processData(elevationServer: string, igc: IGCParser.IGCFile): Pro
                 gpsAlt: fix.gpsAltitude as number,
                 groundElev: elevations[i + j],
                 xc,
-                avgSpeed
+                avgSpeed,
             });
         });
     }
@@ -130,7 +136,9 @@ async function writeProcessedFile(filePath: string, flightDate: string, processe
         await file.write('date,altitude(m),ground alt (m),agl (m)\n');
         for (const { time, groundElev, gpsAlt, xc, avgSpeed } of processedData) {
             await file.write(
-                `${flightDate}T${time}Z,${gpsAlt},${groundElev.toFixed(0)},${(gpsAlt - groundElev).toFixed(0)},${xc},${avgSpeed.toFixed(1)}\n`
+                `${flightDate}T${time}Z,${gpsAlt},${groundElev.toFixed(0)},${(gpsAlt - groundElev).toFixed(
+                    0
+                )},${xc},${avgSpeed.toFixed(1)}\n`
             );
         }
     } finally {
