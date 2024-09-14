@@ -133,7 +133,7 @@ async function processData(elevationServer: string, igc: IGCParser.IGCFile): Pro
 async function writeProcessedFile(filePath: string, flightDate: string, processedData: TargetData[]) {
     const file = await fsp.open(filePath, 'w');
     try {
-        await file.write('date,altitude(m),ground alt (m),agl (m)\n');
+        await file.write('date,altitude(m),ground alt(m),agl(m),xc(km),avg speed(km/h)\n');
         for (const { time, groundElev, gpsAlt, xc, avgSpeed } of processedData) {
             await file.write(
                 `${flightDate}T${time}Z,${gpsAlt},${groundElev.toFixed(0)},${(gpsAlt - groundElev).toFixed(
