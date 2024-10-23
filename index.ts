@@ -105,14 +105,15 @@ async function processData(elevationServer: string, igc: IGCParser.IGCFile): Pro
             solved = next.optimal || false;
             if (solved) {
                 const scoreInfo = next.scoreInfo!;
+                const distance = scoreInfo.distance - (!scoreInfo.penalty || Number.isNaN(scoreInfo.penalty) ? 0 : scoreInfo.penalty);
                 xc = [
                     getRouteType(next.opt.scoring.code),
-                    (scoreInfo.distance - (!scoreInfo.penalty || Number.isNaN(scoreInfo.penalty) ? 0 : scoreInfo.penalty)).toFixed(0),
+                    distance.toFixed(0),
                     'km',
                 ]
                     .filter(Boolean)
                     .join(' ');
-                avgSpeed = scoreInfo.distance / ((chunk[chunk.length - 1].timestamp - firstTimestamp) / 3_600_000);
+                avgSpeed = distance / ((chunk[chunk.length - 1].timestamp - firstTimestamp) / 3_600_000);
             }
         } while (!solved);
 
